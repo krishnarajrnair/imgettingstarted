@@ -71,7 +71,6 @@ const striker = {
   friction: 0.82,
   maxSpeed: 6.5,
   heading: -Math.PI / 2,   // initially facing up toward goal
-  dribbleRange: 28,         // extra px beyond contact where spring engages
 };
 
 // The ball — pushed around by striker contact / dribbling spring.
@@ -79,8 +78,8 @@ const ball = {
   x: W / 2, y: 686,        // starts just ahead of striker (striker.y - 34)
   vx: 0, vy: 0,
   radius: 13,
-  friction: 0.88,
-  maxSpeed: 9.0,
+  friction: 0.91,   // slower decel so ball rolls further after a hard kick
+  maxSpeed: 10.0,
   rotation: 0,
 };
 
@@ -244,40 +243,39 @@ function updateStriker() {
 }
 
 // ─── Update Ball ──────────────────────────────────────────────────────────────
+// No spring/glue — ball only moves when the striker physically contacts it.
+// The approach speed at the moment of contact determines how far the ball travels:
+//   gentle nudge (slow pace) → ball stays close to feet
+//   hard sprint into ball    → ball flies ahead; striker must chase it
+// This lets the defender intercept loose balls after fast touches.
 function updateBall() {
   const dx = ball.x - striker.x;
   const dy = ball.y - striker.y;
   const dist = Math.hypot(dx, dy);
   const contactDist = striker.radius + ball.radius;
 
-  // Dribbling spring: when ball is near, pull it to the spot just ahead of the striker.
-  // At sprint speed the ball trails ~5 px behind ideal — realistic dribbling lag.
-  if (dist < contactDist + striker.dribbleRange) {
-    const strikerSpeed = Math.hypot(striker.vx, striker.vy);
-    if (strikerSpeed > 0.3) {
-      const nx = striker.vx / strikerSpeed;
-      const ny = striker.vy / strikerSpeed;
-      const idealX = striker.x + nx * (contactDist + 6);
-      const idealY = striker.y + ny * (contactDist + 6);
-      ball.vx += (idealX - ball.x) * 0.15;
-      ball.vy += (idealY - ball.y) * 0.15;
-    }
-  }
-
-  // Hard collision: prevent ball from passing through striker body.
   if (dist < contactDist && dist > 0.001) {
-    const nx = dx / dist;
+    const nx = dx / dist;   // contact normal: striker → ball (outward)
     const ny = dy / dist;
-    // Separate
+
+    // Separate: push ball to the contact surface so they don't overlap.
     ball.x = striker.x + nx * contactDist;
     ball.y = striker.y + ny * contactDist;
-    // Impulse along contact normal
-    const relVx = ball.vx - striker.vx;
-    const relVy = ball.vy - striker.vy;
-    const dot = relVx * nx + relVy * ny;
-    if (dot < 0) {
-      ball.vx -= 1.5 * dot * nx;
-      ball.vy -= 1.5 * dot * ny;
+
+    // Approach speed: how fast the striker is catching up to the ball along
+    // the contact normal. Positive = striker is pressing into the ball.
+    const vStrikerN = striker.vx * nx + striker.vy * ny;
+    const vBallN    = ball.vx    * nx + ball.vy    * ny;
+    const approach  = vStrikerN - vBallN;
+
+    if (approach > 0) {
+      // Kick multiplier: 2.2× means a sprint touch (6.5 px/frame) sends the
+      // ball ~14 px/frame (capped at maxSpeed 10), rolling ~90 px before
+      // stopping — about 5 player-widths loose. A slow nudge (1 px/frame)
+      // sends it ~22 px, barely leaving the striker's feet.
+      const kickMult = 2.2;
+      ball.vx += approach * kickMult * nx;
+      ball.vy += approach * kickMult * ny;
     }
   }
 
@@ -296,7 +294,13 @@ function updateBall() {
   // Rolling animation
   ball.rotation += ball.vx * 0.06;
 
-  // Field boundary clamp
+  // Field boundary: reflect velocity so the ball bounces off walls naturally.
+  if (ball.x <= FIELD_PAD + ball.radius || ball.x >= W - FIELD_PAD - ball.radius) {
+    ball.vx *= -0.55;
+  }
+  if (ball.y <= ball.radius || ball.y >= H - FIELD_PAD - ball.radius) {
+    ball.vy *= -0.55;
+  }
   ball.x = Math.max(FIELD_PAD + ball.radius, Math.min(W - FIELD_PAD - ball.radius, ball.x));
   ball.y = Math.max(ball.radius, Math.min(H - FIELD_PAD - ball.radius, ball.y));
 
