@@ -44,6 +44,17 @@ let dangerFlash = 0;        // frames remaining for danger flash
 let winParticles = [];
 let defenderStartDelay = 0; // brief grace period at round start
 
+// ─── Touch / Joystick ─────────────────────────────────────────────────────────
+const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+const joystick = {
+  active: false,
+  touchId: null,
+  baseX: 0, baseY: 0,   // canvas coords where touch started
+  knobX: 0, knobY: 0,   // current knob position in canvas coords
+  dx: 0, dy: 0,          // normalised direction (-1 … 1)
+  radius: 60,            // max knob displacement (canvas px)
+};
+
 // ─── Entities ─────────────────────────────────────────────────────────────────
 const ball = {
   x: W / 2, y: 700,
@@ -92,12 +103,93 @@ canvas.addEventListener('click', () => {
   if (gameState !== 'playing') { resetGame(); gameState = 'playing'; }
 });
 
+// ─── Touch helpers ────────────────────────────────────────────────────────────
+function toCanvasCoords(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: (clientX - rect.left) * (W / rect.width),
+    y: (clientY - rect.top)  * (H / rect.height),
+  };
+}
+
+function joystickActivate(touch) {
+  const { x, y } = toCanvasCoords(touch.clientX, touch.clientY);
+  joystick.active  = true;
+  joystick.touchId = touch.identifier;
+  joystick.baseX   = x;
+  joystick.baseY   = y;
+  joystick.knobX   = x;
+  joystick.knobY   = y;
+  joystick.dx      = 0;
+  joystick.dy      = 0;
+}
+
+function joystickMove(touch) {
+  const { x, y } = toCanvasCoords(touch.clientX, touch.clientY);
+  let dx = x - joystick.baseX;
+  let dy = y - joystick.baseY;
+  const dist = Math.hypot(dx, dy);
+  if (dist > joystick.radius) {
+    dx = (dx / dist) * joystick.radius;
+    dy = (dy / dist) * joystick.radius;
+  }
+  joystick.knobX = joystick.baseX + dx;
+  joystick.knobY = joystick.baseY + dy;
+  joystick.dx    = dx / joystick.radius;
+  joystick.dy    = dy / joystick.radius;
+}
+
+function joystickRelease() {
+  joystick.active  = false;
+  joystick.touchId = null;
+  joystick.dx      = 0;
+  joystick.dy      = 0;
+}
+
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  if (gameState !== 'playing') {
+    resetGame();
+    gameState = 'playing';
+    return;
+  }
+  for (const touch of e.changedTouches) {
+    if (!joystick.active) joystickActivate(touch);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    if (touch.identifier === joystick.touchId) joystickMove(touch);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const touch of e.changedTouches) {
+    if (touch.identifier === joystick.touchId) joystickRelease();
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchcancel', e => {
+  for (const touch of e.changedTouches) {
+    if (touch.identifier === joystick.touchId) joystickRelease();
+  }
+});
+
 // ─── Update Ball ──────────────────────────────────────────────────────────────
 function updateBall() {
   if (keys['ArrowLeft']  || keys['a'] || keys['A']) ball.vx -= ball.speed;
   if (keys['ArrowRight'] || keys['d'] || keys['D']) ball.vx += ball.speed;
   if (keys['ArrowUp']    || keys['w'] || keys['W']) ball.vy -= ball.speed;
   if (keys['ArrowDown']  || keys['s'] || keys['S']) ball.vy += ball.speed;
+
+  // Joystick input (additive with keyboard)
+  if (joystick.active) {
+    ball.vx += joystick.dx * ball.speed;
+    ball.vy += joystick.dy * ball.speed;
+  }
 
   ball.vx *= ball.friction;
   ball.vy *= ball.friction;
@@ -356,6 +448,44 @@ function drawDefender() {
   ctx.restore();
 }
 
+// ─── Draw Joystick ────────────────────────────────────────────────────────────
+function drawJoystick() {
+  if (!joystick.active) return;
+
+  // Base ring
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(joystick.baseX, joystick.baseY, joystick.radius, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Base fill
+  ctx.fillStyle = 'rgba(255,255,255,0.12)';
+  ctx.fill();
+
+  // Direction line
+  ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(joystick.baseX, joystick.baseY);
+  ctx.lineTo(joystick.knobX, joystick.knobY);
+  ctx.stroke();
+
+  // Knob
+  ctx.globalAlpha = 0.75;
+  ctx.fillStyle = '#4fc3f7';
+  ctx.beginPath();
+  ctx.arc(joystick.knobX, joystick.knobY, 24, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
 // ─── Draw HUD ─────────────────────────────────────────────────────────────────
 function drawHUD() {
   // Danger flash
@@ -373,6 +503,8 @@ function drawHUD() {
     ctx.textAlign = 'center';
     ctx.fillText('⚠ DEFENDER CLOSE!', W / 2, H / 2 + 30);
   }
+
+  drawJoystick();
 }
 
 // ─── Draw Overlay Helper ──────────────────────────────────────────────────────
@@ -409,7 +541,8 @@ function drawOverlay(color, title, titleColor, subtitle, prompt) {
   // Controls reminder
   ctx.fillStyle = 'rgba(180,220,180,0.85)';
   ctx.font = '14px Arial';
-  ctx.fillText('WASD or Arrow Keys to move', W / 2, H / 2 + 30);
+  const controlsText = isTouchDevice ? 'Touch & drag for joystick' : 'WASD or Arrow Keys to move';
+  ctx.fillText(controlsText, W / 2, H / 2 + 30);
 
   // Prompt (flashing)
   if (Math.floor(Date.now() / 550) % 2 === 0) {
@@ -446,11 +579,14 @@ function drawStartScreen() {
   ctx.shadowBlur = 0;
 
   // Instructions
+  const controlHint = isTouchDevice
+    ? '  Touch & drag — virtual joystick'
+    : '  WASD / Arrow Keys — move ball';
   const lines = [
     'Dribble the ball to the top goal!',
     'Dodge the defender to score.',
     '',
-    '  WASD / Arrow Keys — move ball',
+    controlHint,
     '  Reach the yellow goal at the top',
     '  Don\'t let #5 tackle you!',
   ];
@@ -466,7 +602,10 @@ function drawStartScreen() {
   if (Math.floor(Date.now() / 600) % 2 === 0) {
     ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.font = 'bold 16px Arial';
-    ctx.fillText('▶  Press any key or click to play  ◀', W / 2, H / 2 + 145);
+    const startPrompt = isTouchDevice
+      ? '▶  Tap to play  ◀'
+      : '▶  Press any key or click to play  ◀';
+    ctx.fillText(startPrompt, W / 2, H / 2 + 145);
   }
 }
 
@@ -489,7 +628,7 @@ function drawWinScreen() {
     'GOAL! ⚽',
     '#f4d03f',
     'You dribbled past the defender!',
-    '▶  Press any key to play again  ◀'
+    isTouchDevice ? '▶  Tap to play again  ◀' : '▶  Press any key to play again  ◀'
   );
 }
 
@@ -500,7 +639,7 @@ function drawLoseScreen() {
     'TACKLED!',
     '#ff6b6b',
     'The defender got the ball!',
-    '▶  Press any key to try again  ◀'
+    isTouchDevice ? '▶  Tap to try again  ◀' : '▶  Press any key to try again  ◀'
   );
 }
 
