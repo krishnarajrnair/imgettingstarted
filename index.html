@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Soccer Dribbler</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a2e;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: Arial, sans-serif;
+      overflow: hidden;
+    }
+    canvas {
+      display: block;
+      border: 3px solid rgba(255,255,255,0.2);
+      border-radius: 4px;
+      box-shadow: 0 0 50px rgba(0,0,0,0.7);
+      max-width: 100vw;
+      max-height: 100vh;
+    }
+  </style>
+</head>
+<body>
+<canvas id="game" width="600" height="800"></canvas>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+const W = 600, H = 800;
+const GOAL_Y = 90;          // ball.y - ball.radius < GOAL_Y → win
+const FIELD_PAD = 25;       // field boundary inset
+
+// ─── State ────────────────────────────────────────────────────────────────────
+let gameState = 'start';    // 'start' | 'playing' | 'win' | 'lose'
+const keys = {};
+let dangerFlash = 0;        // frames remaining for danger flash
+let winParticles = [];
+let defenderStartDelay = 0; // brief grace period at round start
+
+// ─── Entities ─────────────────────────────────────────────────────────────────
+const ball = {
+  x: W / 2, y: 700,
+  vx: 0, vy: 0,
+  radius: 13,
+  speed: 0.42,
+  friction: 0.87,
+  maxSpeed: 6.5,
+  rotation: 0,
+};
+
+const defender = {
+  x: W / 2, y: 220,
+  vx: 0, vy: 0,
+  radius: 18,
+  speed: 0.27,
+  friction: 0.80,
+  maxSpeed: 4.6,
+  tackleRadius: 30,
+};
+
+// ─── Reset ────────────────────────────────────────────────────────────────────
+function resetGame() {
+  ball.x = W / 2; ball.y = 700;
+  ball.vx = 0; ball.vy = 0; ball.rotation = 0;
+  defender.x = W / 2; defender.y = 220;
+  defender.vx = 0; defender.vy = 0;
+  dangerFlash = 0;
+  winParticles = [];
+  defenderStartDelay = 90; // ~1.5s grace period
+}
+
+// ─── Input ────────────────────────────────────────────────────────────────────
+document.addEventListener('keydown', e => {
+  keys[e.key] = true;
+  if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight',' '].includes(e.key)) {
+    e.preventDefault();
+  }
+  if (gameState !== 'playing') {
+    resetGame();
+    gameState = 'playing';
+  }
+});
+document.addEventListener('keyup', e => { keys[e.key] = false; });
+canvas.addEventListener('click', () => {
+  if (gameState !== 'playing') { resetGame(); gameState = 'playing'; }
+});
+
+// ─── Update Ball ──────────────────────────────────────────────────────────────
+function updateBall() {
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) ball.vx -= ball.speed;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) ball.vx += ball.speed;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) ball.vy -= ball.speed;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) ball.vy += ball.speed;
+
+  ball.vx *= ball.friction;
+  ball.vy *= ball.friction;
+
+  const spd = Math.hypot(ball.vx, ball.vy);
+  if (spd > ball.maxSpeed) {
+    ball.vx = (ball.vx / spd) * ball.maxSpeed;
+    ball.vy = (ball.vy / spd) * ball.maxSpeed;
+  }
+
+  ball.x += ball.vx;
+  ball.y += ball.vy;
+
+  // Rolling animation
+  ball.rotation += ball.vx * 0.06;
+
+  // Field boundary clamp
+  ball.x = Math.max(FIELD_PAD + ball.radius, Math.min(W - FIELD_PAD - ball.radius, ball.x));
+  ball.y = Math.max(ball.radius, Math.min(H - FIELD_PAD - ball.radius, ball.y));
+}
+
+// ─── Update Defender ─────────────────────────────────────────────────────────
+function updateDefender() {
+  if (defenderStartDelay > 0) { defenderStartDelay--; return; }
+
+  const dx = ball.x - defender.x;
+  const dy = ball.y - defender.y;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist > 1) {
+    const baseAngle = Math.atan2(dy, dx);
+    // Jitter: larger when far away, smaller when close
+    const jitter = dist > 180 ? 0.28 : 0.08;
+    const angle = baseAngle + (Math.random() - 0.5) * jitter;
+
+    // Predictive: lead the ball slightly
+    const predFactor = 0.14;
+    defender.vx += Math.cos(angle) * defender.speed + ball.vx * predFactor;
+    defender.vy += Math.sin(angle) * defender.speed + ball.vy * predFactor;
+  }
+
+  defender.vx *= defender.friction;
+  defender.vy *= defender.friction;
+
+  const dspd = Math.hypot(defender.vx, defender.vy);
+  if (dspd > defender.maxSpeed) {
+    defender.vx = (defender.vx / dspd) * defender.maxSpeed;
+    defender.vy = (defender.vy / dspd) * defender.maxSpeed;
+  }
+
+  defender.x += defender.vx;
+  defender.y += defender.vy;
+
+  // Boundary clamp (defender stays within field, above goal zone)
+  defender.x = Math.max(FIELD_PAD + defender.radius, Math.min(W - FIELD_PAD - defender.radius, defender.x));
+  defender.y = Math.max(GOAL_Y + defender.radius, Math.min(H - FIELD_PAD - defender.radius, defender.y));
+}
+
+// ─── Check Win / Lose ─────────────────────────────────────────────────────────
+function checkConditions() {
+  // Win: ball enters goal zone
+  if (ball.y - ball.radius < GOAL_Y) {
+    gameState = 'win';
+    spawnWinParticles();
+    return;
+  }
+  // Lose: defender tackles ball
+  const dist = Math.hypot(ball.x - defender.x, ball.y - defender.y);
+  if (dist < (ball.radius + defender.tackleRadius)) {
+    gameState = 'lose';
+    return;
+  }
+  // Danger flash when defender is close
+  if (dist < 100) dangerFlash = 6;
+}
+
+// ─── Win Particles ────────────────────────────────────────────────────────────
+function spawnWinParticles() {
+  for (let i = 0; i < 60; i++) {
+    winParticles.push({
+      x: ball.x, y: ball.y,
+      vx: (Math.random() - 0.5) * 9,
+      vy: (Math.random() - 0.5) * 9 - 3,
+      life: 1.0,
+      color: `hsl(${Math.random() * 360}, 90%, 60%)`,
+      size: Math.random() * 6 + 3,
+    });
+  }
+}
+
+function updateParticles() {
+  for (const p of winParticles) {
+    p.x += p.vx; p.y += p.vy;
+    p.vy += 0.25;
+    p.life -= 0.018;
+  }
+  winParticles = winParticles.filter(p => p.life > 0);
+}
+
+// ─── Draw Field ───────────────────────────────────────────────────────────────
+function drawField() {
+  // Grass base
+  ctx.fillStyle = '#3a7d2c';
+  ctx.fillRect(0, 0, W, H);
+
+  // Alternating grass stripes
+  const stripeH = 80;
+  for (let i = 0; i < Math.ceil(H / stripeH); i++) {
+    if (i % 2 === 0) {
+      ctx.fillStyle = 'rgba(0,0,0,0.06)';
+      ctx.fillRect(0, i * stripeH, W, stripeH);
+    }
+  }
+
+  // Field boundary
+  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
+  ctx.lineWidth = 2;
+  ctx.strokeRect(FIELD_PAD, FIELD_PAD, W - FIELD_PAD * 2, H - FIELD_PAD * 2);
+
+  // Center line
+  ctx.beginPath();
+  ctx.moveTo(FIELD_PAD, H / 2);
+  ctx.lineTo(W - FIELD_PAD, H / 2);
+  ctx.stroke();
+
+  // Center circle
+  ctx.beginPath();
+  ctx.arc(W / 2, H / 2, 60, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Center dot
+  ctx.fillStyle = 'rgba(255,255,255,0.8)';
+  ctx.beginPath();
+  ctx.arc(W / 2, H / 2, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Top penalty box
+  ctx.strokeRect(W / 2 - 100, FIELD_PAD, 200, 90);
+  // Bottom penalty box
+  ctx.strokeRect(W / 2 - 100, H - FIELD_PAD - 90, 200, 90);
+
+  // Top small box (goal area)
+  ctx.strokeRect(W / 2 - 55, FIELD_PAD, 110, 40);
+  // Bottom small box
+  ctx.strokeRect(W / 2 - 55, H - FIELD_PAD - 40, 110, 40);
+
+  // ── Goal at top ──
+  // Goal posts (viewed from above, as crossbar extension beyond boundary)
+  ctx.strokeStyle = 'white';
+  ctx.lineWidth = 4;
+  ctx.strokeRect(W / 2 - 60, 5, 120, FIELD_PAD);
+
+  // Goal net lines inside
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 1;
+  for (let nx = W / 2 - 50; nx <= W / 2 + 50; nx += 20) {
+    ctx.beginPath();
+    ctx.moveTo(nx, 5);
+    ctx.lineTo(nx, FIELD_PAD);
+    ctx.stroke();
+  }
+
+  // Goal glow
+  const gGoal = ctx.createLinearGradient(0, 0, 0, GOAL_Y + 20);
+  gGoal.addColorStop(0, 'rgba(255,230,0,0.3)');
+  gGoal.addColorStop(1, 'rgba(255,230,0,0)');
+  ctx.fillStyle = gGoal;
+  ctx.fillRect(W / 2 - 60, 5, 120, GOAL_Y + 15);
+
+  // "GOAL" arrow indicator
+  ctx.fillStyle = 'rgba(255,220,0,0.9)';
+  ctx.font = 'bold 13px Arial';
+  ctx.textAlign = 'center';
+  ctx.fillText('▲ GOAL ▲', W / 2, GOAL_Y + 20);
+}
+
+// ─── Draw Ball ────────────────────────────────────────────────────────────────
+function drawBall() {
+  ctx.save();
+  ctx.translate(ball.x, ball.y);
+
+  // Shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(3, ball.radius - 4, ball.radius, 5, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.rotate(ball.rotation);
+
+  // White base
+  ctx.fillStyle = 'white';
+  ctx.beginPath();
+  ctx.arc(0, 0, ball.radius, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Black border
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  // Soccer ball black patches
+  ctx.fillStyle = '#111';
+  // Center patch
+  ctx.beginPath();
+  ctx.arc(0, 0, 4, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 5 radial patches
+  const pR = ball.radius * 0.62;
+  for (let i = 0; i < 5; i++) {
+    const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
+    ctx.beginPath();
+    ctx.arc(Math.cos(a) * pR, Math.sin(a) * pR, 3.2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+// ─── Draw Defender ───────────────────────────────────────────────────────────
+function drawDefender() {
+  ctx.save();
+  ctx.translate(defender.x, defender.y);
+
+  // Ground shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(3, defender.radius + 2, defender.radius - 2, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body (jersey)
+  ctx.fillStyle = '#e63946';
+  ctx.beginPath();
+  ctx.arc(0, 0, defender.radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#9b1c28';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Jersey number
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 14px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('5', 0, 2);
+
+  // Head
+  ctx.fillStyle = '#f4a261';
+  ctx.beginPath();
+  ctx.arc(0, -defender.radius - 8, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#c47841';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+// ─── Draw HUD ─────────────────────────────────────────────────────────────────
+function drawHUD() {
+  // Danger flash
+  if (dangerFlash > 0) {
+    ctx.fillStyle = `rgba(220,30,30,${(dangerFlash / 6) * 0.22})`;
+    ctx.fillRect(0, 0, W, H);
+    dangerFlash--;
+  }
+
+  // "DEFENDER CLOSE!" warning
+  const dist = Math.hypot(ball.x - defender.x, ball.y - defender.y);
+  if (dist < 80 && defenderStartDelay === 0) {
+    ctx.fillStyle = `rgba(255,60,60,${Math.min(1, (80 - dist) / 50)})`;
+    ctx.font = 'bold 16px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('⚠ DEFENDER CLOSE!', W / 2, H / 2 + 30);
+  }
+}
+
+// ─── Draw Overlay Helper ──────────────────────────────────────────────────────
+function drawOverlay(color, title, titleColor, subtitle, prompt) {
+  // Dimmed field overlay
+  ctx.fillStyle = color;
+  ctx.fillRect(0, 0, W, H);
+
+  // Panel
+  ctx.fillStyle = 'rgba(0,0,0,0.7)';
+  roundRect(ctx, W / 2 - 200, H / 2 - 130, 400, 270, 16);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+  ctx.lineWidth = 2;
+  roundRect(ctx, W / 2 - 200, H / 2 - 130, 400, 270, 16);
+  ctx.stroke();
+
+  // Title
+  ctx.fillStyle = titleColor;
+  ctx.font = 'bold 48px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'black';
+  ctx.shadowBlur = 8;
+  ctx.fillText(title, W / 2, H / 2 - 70);
+  ctx.shadowBlur = 0;
+
+  // Subtitle
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.font = '18px Arial';
+  ctx.fillText(subtitle, W / 2, H / 2 - 10);
+
+  // Controls reminder
+  ctx.fillStyle = 'rgba(180,220,180,0.85)';
+  ctx.font = '14px Arial';
+  ctx.fillText('WASD or Arrow Keys to move', W / 2, H / 2 + 30);
+
+  // Prompt (flashing)
+  if (Math.floor(Date.now() / 550) % 2 === 0) {
+    ctx.fillStyle = 'rgba(255,255,255,0.8)';
+    ctx.font = 'bold 15px Arial';
+    ctx.fillText(prompt, W / 2, H / 2 + 90);
+  }
+}
+
+// ─── Draw Start Screen ───────────────────────────────────────────────────────
+function drawStartScreen() {
+  drawField();
+
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fillRect(0, 0, W, H);
+
+  // Panel
+  ctx.fillStyle = 'rgba(10,30,10,0.88)';
+  roundRect(ctx, W / 2 - 210, H / 2 - 175, 420, 360, 18);
+  ctx.fill();
+
+  ctx.strokeStyle = 'rgba(100,200,100,0.5)';
+  ctx.lineWidth = 2;
+  roundRect(ctx, W / 2 - 210, H / 2 - 175, 420, 360, 18);
+  ctx.stroke();
+
+  // Title
+  ctx.fillStyle = '#f4d03f';
+  ctx.font = 'bold 46px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.shadowColor = 'black'; ctx.shadowBlur = 10;
+  ctx.fillText('⚽ SOCCER DRIBBLER', W / 2, H / 2 - 115);
+  ctx.shadowBlur = 0;
+
+  // Instructions
+  const lines = [
+    'Dribble the ball to the top goal!',
+    'Dodge the defender to score.',
+    '',
+    '  WASD / Arrow Keys — move ball',
+    '  Reach the yellow goal at the top',
+    '  Don\'t let #5 tackle you!',
+  ];
+
+  ctx.fillStyle = 'rgba(220,255,220,0.9)';
+  ctx.font = '17px Arial';
+  lines.forEach((line, i) => {
+    ctx.fillStyle = i < 2 ? 'rgba(255,255,180,0.95)' : 'rgba(200,240,200,0.85)';
+    ctx.fillText(line, W / 2, H / 2 - 45 + i * 30);
+  });
+
+  // Prompt
+  if (Math.floor(Date.now() / 600) % 2 === 0) {
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.font = 'bold 16px Arial';
+    ctx.fillText('▶  Press any key or click to play  ◀', W / 2, H / 2 + 145);
+  }
+}
+
+// ─── Draw Win Screen ──────────────────────────────────────────────────────────
+function drawWinScreen() {
+  // Particles
+  for (const p of winParticles) {
+    ctx.save();
+    ctx.globalAlpha = p.life;
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+  updateParticles();
+
+  drawOverlay(
+    'rgba(0,120,0,0.45)',
+    'GOAL! ⚽',
+    '#f4d03f',
+    'You dribbled past the defender!',
+    '▶  Press any key to play again  ◀'
+  );
+}
+
+// ─── Draw Lose Screen ─────────────────────────────────────────────────────────
+function drawLoseScreen() {
+  drawOverlay(
+    'rgba(180,0,0,0.40)',
+    'TACKLED!',
+    '#ff6b6b',
+    'The defender got the ball!',
+    '▶  Press any key to try again  ◀'
+  );
+}
+
+// ─── Rounded Rect Helper ──────────────────────────────────────────────────────
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.lineTo(x + w - r, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r);
+  ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+// ─── Main Game Loop ───────────────────────────────────────────────────────────
+function gameLoop() {
+  ctx.clearRect(0, 0, W, H);
+
+  if (gameState === 'start') {
+    drawStartScreen();
+  } else if (gameState === 'playing') {
+    updateBall();
+    updateDefender();
+    checkConditions();
+
+    drawField();
+    drawDefender();
+    drawBall();
+    drawHUD();
+  } else if (gameState === 'win') {
+    drawField();
+    drawDefender();
+    drawBall();
+    drawWinScreen();
+  } else if (gameState === 'lose') {
+    drawField();
+    drawDefender();
+    drawBall();
+    drawLoseScreen();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+
+requestAnimationFrame(gameLoop);
+</script>
+</body>
+</html>
