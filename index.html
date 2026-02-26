@@ -55,6 +55,12 @@ const joystick = {
   radius: 60,            // max knob displacement (canvas px)
 };
 
+// ─── Defender reaction delay ──────────────────────────────────────────────────
+// Defender chases where the ball was DEFENDER_DELAY frames ago (~0.4 s at 60 fps).
+// This means a sharp cut leaves the defender committed to the old direction briefly.
+const DEFENDER_DELAY = 25;
+const ballHistory = []; // ring-buffer of {x, y}
+
 // ─── Entities ─────────────────────────────────────────────────────────────────
 const ball = {
   x: W / 2, y: 700,
@@ -74,6 +80,8 @@ const defender = {
   friction: 0.80,
   maxSpeed: 4.6,
   tackleRadius: 30,
+  heading: Math.PI / 2,  // current facing direction (radians); π/2 = pointing down toward ball
+  maxTurnRate: 0.07,     // max heading change per frame (≈4° — limits how fast defender pivots)
 };
 
 // ─── Reset ────────────────────────────────────────────────────────────────────
@@ -82,9 +90,16 @@ function resetGame() {
   ball.vx = 0; ball.vy = 0; ball.rotation = 0;
   defender.x = W / 2; defender.y = 220;
   defender.vx = 0; defender.vy = 0;
+  defender.heading = Math.PI / 2;
   dangerFlash = 0;
   winParticles = [];
   defenderStartDelay = 90; // ~1.5s grace period
+
+  // Pre-fill history with ball's starting position
+  ballHistory.length = 0;
+  for (let i = 0; i < DEFENDER_DELAY; i++) {
+    ballHistory.push({ x: W / 2, y: 700 });
+  }
 }
 
 // ─── Input ────────────────────────────────────────────────────────────────────
@@ -209,26 +224,43 @@ function updateBall() {
   // Field boundary clamp
   ball.x = Math.max(FIELD_PAD + ball.radius, Math.min(W - FIELD_PAD - ball.radius, ball.x));
   ball.y = Math.max(ball.radius, Math.min(H - FIELD_PAD - ball.radius, ball.y));
+
+  // Record position for defender's delayed perception
+  ballHistory.push({ x: ball.x, y: ball.y });
+  if (ballHistory.length > DEFENDER_DELAY) ballHistory.shift();
 }
 
 // ─── Update Defender ─────────────────────────────────────────────────────────
 function updateDefender() {
   if (defenderStartDelay > 0) { defenderStartDelay--; return; }
 
-  const dx = ball.x - defender.x;
-  const dy = ball.y - defender.y;
+  // Chase the *delayed* ball position so the defender is always reacting to
+  // where the ball was ~0.4 s ago rather than where it is right now.
+  const target = ballHistory[0] || ball;
+  const dx = target.x - defender.x;
+  const dy = target.y - defender.y;
   const dist = Math.hypot(dx, dy);
 
   if (dist > 1) {
-    const baseAngle = Math.atan2(dy, dx);
-    // Jitter: larger when far away, smaller when close
-    const jitter = dist > 180 ? 0.28 : 0.08;
-    const angle = baseAngle + (Math.random() - 0.5) * jitter;
+    // Desired heading toward the (delayed) target
+    const desiredAngle = Math.atan2(dy, dx);
 
-    // Predictive: lead the ball slightly
-    const predFactor = 0.14;
-    defender.vx += Math.cos(angle) * defender.speed + ball.vx * predFactor;
-    defender.vy += Math.sin(angle) * defender.speed + ball.vy * predFactor;
+    // Angular difference, wrapped to [-π, π]
+    let diff = desiredAngle - defender.heading;
+    while (diff >  Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+
+    // Rate-limit the turn — defender can't pivot instantly
+    diff = Math.max(-defender.maxTurnRate, Math.min(defender.maxTurnRate, diff));
+    defender.heading += diff;
+
+    // Small positional jitter so straight-line chasing isn't perfect
+    const jitter = dist > 180 ? 0.10 : 0.03;
+    defender.heading += (Math.random() - 0.5) * jitter;
+
+    // Accelerate in the (rate-limited) heading direction
+    defender.vx += Math.cos(defender.heading) * defender.speed;
+    defender.vy += Math.sin(defender.heading) * defender.speed;
   }
 
   defender.vx *= defender.friction;
@@ -687,6 +719,9 @@ function gameLoop() {
 
   requestAnimationFrame(gameLoop);
 }
+
+// Initialise history so the buffer is never empty before the first round
+for (let i = 0; i < DEFENDER_DELAY; i++) ballHistory.push({ x: W / 2, y: 700 });
 
 requestAnimationFrame(gameLoop);
 </script>
