@@ -40,65 +40,84 @@ const FIELD_PAD = 25;       // field boundary inset
 // ─── State ────────────────────────────────────────────────────────────────────
 let gameState = 'start';    // 'start' | 'playing' | 'win' | 'lose'
 const keys = {};
-let dangerFlash = 0;        // frames remaining for danger flash
+let dangerFlash = 0;
 let winParticles = [];
-let defenderStartDelay = 0; // brief grace period at round start
+let defenderStartDelay = 0;
 
 // ─── Touch / Joystick ─────────────────────────────────────────────────────────
 const isTouchDevice = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
 const joystick = {
   active: false,
   touchId: null,
-  baseX: 0, baseY: 0,   // canvas coords where touch started
-  knobX: 0, knobY: 0,   // current knob position in canvas coords
-  dx: 0, dy: 0,          // normalised direction (-1 … 1)
-  radius: 60,            // max knob displacement (canvas px)
+  baseX: 0, baseY: 0,
+  knobX: 0, knobY: 0,
+  dx: 0, dy: 0,
+  radius: 60,
 };
 
 // ─── Defender reaction delay ──────────────────────────────────────────────────
-// Defender chases where the ball was DEFENDER_DELAY frames ago (~0.4 s at 60 fps).
-// This means a sharp cut leaves the defender committed to the old direction briefly.
-const DEFENDER_DELAY = 25;
-const ballHistory = []; // ring-buffer of {x, y}
+// 18 frames (~0.3 s at 60 fps) — reduced from 25 so feinting is harder.
+const DEFENDER_DELAY = 18;
+const ballHistory = [];
 
 // ─── Entities ─────────────────────────────────────────────────────────────────
+
+// Player's striker — input moves this character; ball dribbles at their feet.
+const striker = {
+  x: W / 2, y: 720,
+  vx: 0, vy: 0,
+  radius: 16,
+  speed: 0.44,
+  friction: 0.82,
+  maxSpeed: 6.5,
+  heading: -Math.PI / 2,   // initially facing up toward goal
+  dribbleRange: 28,         // extra px beyond contact where spring engages
+};
+
+// The ball — pushed around by striker contact / dribbling spring.
 const ball = {
-  x: W / 2, y: 700,
+  x: W / 2, y: 686,        // starts just ahead of striker (striker.y - 34)
   vx: 0, vy: 0,
   radius: 13,
-  speed: 0.42,
-  friction: 0.87,
-  maxSpeed: 6.5,
+  friction: 0.88,
+  maxSpeed: 9.0,
   rotation: 0,
 };
 
+// Opposing defender — harder than before.
 const defender = {
   x: W / 2, y: 220,
   vx: 0, vy: 0,
   radius: 18,
-  speed: 0.27,
+  speed: 0.31,              // was 0.27
   friction: 0.80,
-  maxSpeed: 4.6,
+  maxSpeed: 5.2,            // was 4.6
   tackleRadius: 30,
-  heading: Math.PI / 2,  // current facing direction (radians); π/2 = pointing down toward ball
-  maxTurnRate: 0.07,     // max heading change per frame (≈4° — limits how fast defender pivots)
+  heading: Math.PI / 2,    // initially facing down toward ball
+  maxTurnRate: 0.09,        // was 0.07 — pivots faster
 };
 
 // ─── Reset ────────────────────────────────────────────────────────────────────
 function resetGame() {
-  ball.x = W / 2; ball.y = 700;
+  striker.x = W / 2; striker.y = 720;
+  striker.vx = 0; striker.vy = 0;
+  striker.heading = -Math.PI / 2;
+
+  ball.x = W / 2;
+  ball.y = striker.y - (striker.radius + ball.radius + 5);
   ball.vx = 0; ball.vy = 0; ball.rotation = 0;
+
   defender.x = W / 2; defender.y = 220;
   defender.vx = 0; defender.vy = 0;
   defender.heading = Math.PI / 2;
+
   dangerFlash = 0;
   winParticles = [];
-  defenderStartDelay = 90; // ~1.5s grace period
+  defenderStartDelay = 55; // ~0.9 s grace period (was 90 = ~1.5 s)
 
-  // Pre-fill history with ball's starting position
   ballHistory.length = 0;
   for (let i = 0; i < DEFENDER_DELAY; i++) {
-    ballHistory.push({ x: W / 2, y: 700 });
+    ballHistory.push({ x: ball.x, y: ball.y });
   }
 }
 
@@ -193,17 +212,73 @@ canvas.addEventListener('touchcancel', e => {
   }
 });
 
+// ─── Update Striker ───────────────────────────────────────────────────────────
+function updateStriker() {
+  if (keys['ArrowLeft']  || keys['a'] || keys['A']) striker.vx -= striker.speed;
+  if (keys['ArrowRight'] || keys['d'] || keys['D']) striker.vx += striker.speed;
+  if (keys['ArrowUp']    || keys['w'] || keys['W']) striker.vy -= striker.speed;
+  if (keys['ArrowDown']  || keys['s'] || keys['S']) striker.vy += striker.speed;
+
+  if (joystick.active) {
+    striker.vx += joystick.dx * striker.speed;
+    striker.vy += joystick.dy * striker.speed;
+  }
+
+  striker.vx *= striker.friction;
+  striker.vy *= striker.friction;
+
+  const spd = Math.hypot(striker.vx, striker.vy);
+  if (spd > striker.maxSpeed) {
+    striker.vx = (striker.vx / spd) * striker.maxSpeed;
+    striker.vy = (striker.vy / spd) * striker.maxSpeed;
+  }
+
+  // Update facing direction for visual purposes
+  if (spd > 0.3) striker.heading = Math.atan2(striker.vy, striker.vx);
+
+  striker.x += striker.vx;
+  striker.y += striker.vy;
+
+  striker.x = Math.max(FIELD_PAD + striker.radius, Math.min(W - FIELD_PAD - striker.radius, striker.x));
+  striker.y = Math.max(striker.radius, Math.min(H - FIELD_PAD - striker.radius, striker.y));
+}
+
 // ─── Update Ball ──────────────────────────────────────────────────────────────
 function updateBall() {
-  if (keys['ArrowLeft']  || keys['a'] || keys['A']) ball.vx -= ball.speed;
-  if (keys['ArrowRight'] || keys['d'] || keys['D']) ball.vx += ball.speed;
-  if (keys['ArrowUp']    || keys['w'] || keys['W']) ball.vy -= ball.speed;
-  if (keys['ArrowDown']  || keys['s'] || keys['S']) ball.vy += ball.speed;
+  const dx = ball.x - striker.x;
+  const dy = ball.y - striker.y;
+  const dist = Math.hypot(dx, dy);
+  const contactDist = striker.radius + ball.radius;
 
-  // Joystick input (additive with keyboard)
-  if (joystick.active) {
-    ball.vx += joystick.dx * ball.speed;
-    ball.vy += joystick.dy * ball.speed;
+  // Dribbling spring: when ball is near, pull it to the spot just ahead of the striker.
+  // At sprint speed the ball trails ~5 px behind ideal — realistic dribbling lag.
+  if (dist < contactDist + striker.dribbleRange) {
+    const strikerSpeed = Math.hypot(striker.vx, striker.vy);
+    if (strikerSpeed > 0.3) {
+      const nx = striker.vx / strikerSpeed;
+      const ny = striker.vy / strikerSpeed;
+      const idealX = striker.x + nx * (contactDist + 6);
+      const idealY = striker.y + ny * (contactDist + 6);
+      ball.vx += (idealX - ball.x) * 0.15;
+      ball.vy += (idealY - ball.y) * 0.15;
+    }
+  }
+
+  // Hard collision: prevent ball from passing through striker body.
+  if (dist < contactDist && dist > 0.001) {
+    const nx = dx / dist;
+    const ny = dy / dist;
+    // Separate
+    ball.x = striker.x + nx * contactDist;
+    ball.y = striker.y + ny * contactDist;
+    // Impulse along contact normal
+    const relVx = ball.vx - striker.vx;
+    const relVy = ball.vy - striker.vy;
+    const dot = relVx * nx + relVy * ny;
+    if (dot < 0) {
+      ball.vx -= 1.5 * dot * nx;
+      ball.vy -= 1.5 * dot * ny;
+    }
   }
 
   ball.vx *= ball.friction;
@@ -234,31 +309,25 @@ function updateBall() {
 function updateDefender() {
   if (defenderStartDelay > 0) { defenderStartDelay--; return; }
 
-  // Chase the *delayed* ball position so the defender is always reacting to
-  // where the ball was ~0.4 s ago rather than where it is right now.
+  // Chase where the ball was DEFENDER_DELAY frames ago.
   const target = ballHistory[0] || ball;
   const dx = target.x - defender.x;
   const dy = target.y - defender.y;
   const dist = Math.hypot(dx, dy);
 
   if (dist > 1) {
-    // Desired heading toward the (delayed) target
     const desiredAngle = Math.atan2(dy, dx);
 
-    // Angular difference, wrapped to [-π, π]
     let diff = desiredAngle - defender.heading;
     while (diff >  Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
 
-    // Rate-limit the turn — defender can't pivot instantly
     diff = Math.max(-defender.maxTurnRate, Math.min(defender.maxTurnRate, diff));
     defender.heading += diff;
 
-    // Small positional jitter so straight-line chasing isn't perfect
     const jitter = dist > 180 ? 0.10 : 0.03;
     defender.heading += (Math.random() - 0.5) * jitter;
 
-    // Accelerate in the (rate-limited) heading direction
     defender.vx += Math.cos(defender.heading) * defender.speed;
     defender.vy += Math.sin(defender.heading) * defender.speed;
   }
@@ -275,7 +344,6 @@ function updateDefender() {
   defender.x += defender.vx;
   defender.y += defender.vy;
 
-  // Boundary clamp (defender stays within field, above goal zone)
   defender.x = Math.max(FIELD_PAD + defender.radius, Math.min(W - FIELD_PAD - defender.radius, defender.x));
   defender.y = Math.max(GOAL_Y + defender.radius, Math.min(H - FIELD_PAD - defender.radius, defender.y));
 }
@@ -294,7 +362,7 @@ function checkConditions() {
     gameState = 'lose';
     return;
   }
-  // Danger flash when defender is close
+  // Danger flash when defender is close to ball
   if (dist < 100) dangerFlash = 6;
 }
 
@@ -369,12 +437,11 @@ function drawField() {
   ctx.strokeRect(W / 2 - 55, H - FIELD_PAD - 40, 110, 40);
 
   // ── Goal at top ──
-  // Goal posts (viewed from above, as crossbar extension beyond boundary)
   ctx.strokeStyle = 'white';
   ctx.lineWidth = 4;
   ctx.strokeRect(W / 2 - 60, 5, 120, FIELD_PAD);
 
-  // Goal net lines inside
+  // Goal net lines
   ctx.strokeStyle = 'rgba(255,255,255,0.4)';
   ctx.lineWidth = 1;
   for (let nx = W / 2 - 50; nx <= W / 2 + 50; nx += 20) {
@@ -417,19 +484,16 @@ function drawBall() {
   ctx.arc(0, 0, ball.radius, 0, Math.PI * 2);
   ctx.fill();
 
-  // Black border
   ctx.strokeStyle = '#222';
   ctx.lineWidth = 1.5;
   ctx.stroke();
 
-  // Soccer ball black patches
+  // Soccer ball patches
   ctx.fillStyle = '#111';
-  // Center patch
   ctx.beginPath();
   ctx.arc(0, 0, 4, 0, Math.PI * 2);
   ctx.fill();
 
-  // 5 radial patches
   const pR = ball.radius * 0.62;
   for (let i = 0; i < 5; i++) {
     const a = (i / 5) * Math.PI * 2 - Math.PI / 2;
@@ -437,6 +501,45 @@ function drawBall() {
     ctx.arc(Math.cos(a) * pR, Math.sin(a) * pR, 3.2, 0, Math.PI * 2);
     ctx.fill();
   }
+
+  ctx.restore();
+}
+
+// ─── Draw Striker ─────────────────────────────────────────────────────────────
+function drawStriker() {
+  ctx.save();
+  ctx.translate(striker.x, striker.y);
+
+  // Ground shadow
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath();
+  ctx.ellipse(3, striker.radius + 2, striker.radius - 2, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  // Body — blue jersey (player's team)
+  ctx.fillStyle = '#1565C0';
+  ctx.beginPath();
+  ctx.arc(0, 0, striker.radius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#0D47A1';
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // Jersey number 9
+  ctx.fillStyle = 'white';
+  ctx.font = 'bold 14px Arial';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('9', 0, 2);
+
+  // Head
+  ctx.fillStyle = '#f4a261';
+  ctx.beginPath();
+  ctx.arc(0, -striker.radius - 8, 10, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.strokeStyle = '#c47841';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
 
   ctx.restore();
 }
@@ -452,7 +555,7 @@ function drawDefender() {
   ctx.ellipse(3, defender.radius + 2, defender.radius - 2, 6, 0, 0, Math.PI * 2);
   ctx.fill();
 
-  // Body (jersey)
+  // Body — red jersey
   ctx.fillStyle = '#e63946';
   ctx.beginPath();
   ctx.arc(0, 0, defender.radius, 0, Math.PI * 2);
@@ -484,7 +587,6 @@ function drawDefender() {
 function drawJoystick() {
   if (!joystick.active) return;
 
-  // Base ring
   ctx.save();
   ctx.globalAlpha = 0.35;
   ctx.strokeStyle = 'white';
@@ -493,11 +595,9 @@ function drawJoystick() {
   ctx.arc(joystick.baseX, joystick.baseY, joystick.radius, 0, Math.PI * 2);
   ctx.stroke();
 
-  // Base fill
   ctx.fillStyle = 'rgba(255,255,255,0.12)';
   ctx.fill();
 
-  // Direction line
   ctx.strokeStyle = 'rgba(255,255,255,0.5)';
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -505,7 +605,6 @@ function drawJoystick() {
   ctx.lineTo(joystick.knobX, joystick.knobY);
   ctx.stroke();
 
-  // Knob
   ctx.globalAlpha = 0.75;
   ctx.fillStyle = '#4fc3f7';
   ctx.beginPath();
@@ -527,7 +626,7 @@ function drawHUD() {
     dangerFlash--;
   }
 
-  // "DEFENDER CLOSE!" warning
+  // "DEFENDER CLOSE!" warning — based on defender-to-ball distance
   const dist = Math.hypot(ball.x - defender.x, ball.y - defender.y);
   if (dist < 80 && defenderStartDelay === 0) {
     ctx.fillStyle = `rgba(255,60,60,${Math.min(1, (80 - dist) / 50)})`;
@@ -541,11 +640,9 @@ function drawHUD() {
 
 // ─── Draw Overlay Helper ──────────────────────────────────────────────────────
 function drawOverlay(color, title, titleColor, subtitle, prompt) {
-  // Dimmed field overlay
   ctx.fillStyle = color;
   ctx.fillRect(0, 0, W, H);
 
-  // Panel
   ctx.fillStyle = 'rgba(0,0,0,0.7)';
   roundRect(ctx, W / 2 - 200, H / 2 - 130, 400, 270, 16);
   ctx.fill();
@@ -555,7 +652,6 @@ function drawOverlay(color, title, titleColor, subtitle, prompt) {
   roundRect(ctx, W / 2 - 200, H / 2 - 130, 400, 270, 16);
   ctx.stroke();
 
-  // Title
   ctx.fillStyle = titleColor;
   ctx.font = 'bold 48px Arial';
   ctx.textAlign = 'center';
@@ -565,18 +661,15 @@ function drawOverlay(color, title, titleColor, subtitle, prompt) {
   ctx.fillText(title, W / 2, H / 2 - 70);
   ctx.shadowBlur = 0;
 
-  // Subtitle
   ctx.fillStyle = 'rgba(255,255,255,0.9)';
   ctx.font = '18px Arial';
   ctx.fillText(subtitle, W / 2, H / 2 - 10);
 
-  // Controls reminder
   ctx.fillStyle = 'rgba(180,220,180,0.85)';
   ctx.font = '14px Arial';
   const controlsText = isTouchDevice ? 'Touch & drag for joystick' : 'WASD or Arrow Keys to move';
   ctx.fillText(controlsText, W / 2, H / 2 + 30);
 
-  // Prompt (flashing)
   if (Math.floor(Date.now() / 550) % 2 === 0) {
     ctx.fillStyle = 'rgba(255,255,255,0.8)';
     ctx.font = 'bold 15px Arial';
@@ -591,7 +684,6 @@ function drawStartScreen() {
   ctx.fillStyle = 'rgba(0,0,0,0.5)';
   ctx.fillRect(0, 0, W, H);
 
-  // Panel
   ctx.fillStyle = 'rgba(10,30,10,0.88)';
   roundRect(ctx, W / 2 - 210, H / 2 - 175, 420, 360, 18);
   ctx.fill();
@@ -601,7 +693,6 @@ function drawStartScreen() {
   roundRect(ctx, W / 2 - 210, H / 2 - 175, 420, 360, 18);
   ctx.stroke();
 
-  // Title
   ctx.fillStyle = '#f4d03f';
   ctx.font = 'bold 46px Arial';
   ctx.textAlign = 'center';
@@ -610,27 +701,24 @@ function drawStartScreen() {
   ctx.fillText('⚽ SOCCER DRIBBLER', W / 2, H / 2 - 115);
   ctx.shadowBlur = 0;
 
-  // Instructions
   const controlHint = isTouchDevice
     ? '  Touch & drag — virtual joystick'
-    : '  WASD / Arrow Keys — move ball';
+    : '  WASD / Arrow Keys — move striker';
   const lines = [
-    'Dribble the ball to the top goal!',
-    'Dodge the defender to score.',
+    'Dribble past the defender to score!',
+    'Control your striker — ball follows!',
     '',
     controlHint,
-    '  Reach the yellow goal at the top',
-    '  Don\'t let #5 tackle you!',
+    '  Push the ball into the yellow goal',
+    '  Don\'t let #5 tackle the ball!',
   ];
 
-  ctx.fillStyle = 'rgba(220,255,220,0.9)';
   ctx.font = '17px Arial';
   lines.forEach((line, i) => {
     ctx.fillStyle = i < 2 ? 'rgba(255,255,180,0.95)' : 'rgba(200,240,200,0.85)';
     ctx.fillText(line, W / 2, H / 2 - 45 + i * 30);
   });
 
-  // Prompt
   if (Math.floor(Date.now() / 600) % 2 === 0) {
     ctx.fillStyle = 'rgba(255,255,255,0.9)';
     ctx.font = 'bold 16px Arial';
@@ -643,7 +731,6 @@ function drawStartScreen() {
 
 // ─── Draw Win Screen ──────────────────────────────────────────────────────────
 function drawWinScreen() {
-  // Particles
   for (const p of winParticles) {
     ctx.save();
     ctx.globalAlpha = p.life;
@@ -697,22 +784,26 @@ function gameLoop() {
   if (gameState === 'start') {
     drawStartScreen();
   } else if (gameState === 'playing') {
+    updateStriker();
     updateBall();
     updateDefender();
     checkConditions();
 
     drawField();
     drawDefender();
+    drawStriker();
     drawBall();
     drawHUD();
   } else if (gameState === 'win') {
     drawField();
     drawDefender();
+    drawStriker();
     drawBall();
     drawWinScreen();
   } else if (gameState === 'lose') {
     drawField();
     drawDefender();
+    drawStriker();
     drawBall();
     drawLoseScreen();
   }
@@ -720,9 +811,8 @@ function gameLoop() {
   requestAnimationFrame(gameLoop);
 }
 
-// Initialise history so the buffer is never empty before the first round
-for (let i = 0; i < DEFENDER_DELAY; i++) ballHistory.push({ x: W / 2, y: 700 });
-
+// Initialise all state before first frame
+resetGame();
 requestAnimationFrame(gameLoop);
 </script>
 </body>
