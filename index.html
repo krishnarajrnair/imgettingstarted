@@ -243,39 +243,61 @@ function updateStriker() {
 }
 
 // ─── Update Ball ──────────────────────────────────────────────────────────────
-// No spring/glue — ball only moves when the striker physically contacts it.
-// The approach speed at the moment of contact determines how far the ball travels:
-//   gentle nudge (slow pace) → ball stays close to feet
-//   hard sprint into ball    → ball flies ahead; striker must chase it
-// This lets the defender intercept loose balls after fast touches.
+// Hybrid dribbling model:
+//   • At normal pace the ball is loosely attached (weak spring keeps it at
+//     striker's feet so the player can navigate freely).
+//   • When the striker sprints hard into the ball (approach speed ≥ threshold)
+//     the spring is ignored and a power kick sends the ball flying — giving
+//     the defender a real window to intercept the loose ball.
+const STRIKE_THRESHOLD = 2.5; // approach px/frame that triggers a power kick
+const SPRING_STR       = 0.07; // spring constant for gentle attachment
+const KICK_MULT        = 3.0;  // velocity multiplier on a power strike
+
 function updateBall() {
   const dx = ball.x - striker.x;
   const dy = ball.y - striker.y;
   const dist = Math.hypot(dx, dy);
   const contactDist = striker.radius + ball.radius;
 
+  // ── Loose attachment (spring) — only during gentle movement ──────────────
+  const strikerSpeed = Math.hypot(striker.vx, striker.vy);
+  if (dist < contactDist + 20 && strikerSpeed > 0.25) {
+    // Measure how aggressively the striker is pressing into the ball.
+    const nx_d = dist > 0.001 ? dx / dist : 0;
+    const ny_d = dist > 0.001 ? dy / dist : 1;
+    const approachCheck = (striker.vx - ball.vx) * nx_d + (striker.vy - ball.vy) * ny_d;
+
+    if (approachCheck < STRIKE_THRESHOLD) {
+      // Gentle pace → spring toward spot just ahead of striker.
+      const snx = striker.vx / strikerSpeed;
+      const sny = striker.vy / strikerSpeed;
+      const idealX = striker.x + snx * (contactDist + 5);
+      const idealY = striker.y + sny * (contactDist + 5);
+      ball.vx += (idealX - ball.x) * SPRING_STR;
+      ball.vy += (idealY - ball.y) * SPRING_STR;
+    }
+    // High approach → skip spring; let hard collision below deliver the kick.
+  }
+
+  // ── Hard collision + pace-sensitive kick ──────────────────────────────────
   if (dist < contactDist && dist > 0.001) {
-    const nx = dx / dist;   // contact normal: striker → ball (outward)
+    const nx = dx / dist;
     const ny = dy / dist;
 
-    // Separate: push ball to the contact surface so they don't overlap.
+    // Separate: push ball to contact surface.
     ball.x = striker.x + nx * contactDist;
     ball.y = striker.y + ny * contactDist;
 
-    // Approach speed: how fast the striker is catching up to the ball along
-    // the contact normal. Positive = striker is pressing into the ball.
     const vStrikerN = striker.vx * nx + striker.vy * ny;
     const vBallN    = ball.vx    * nx + ball.vy    * ny;
     const approach  = vStrikerN - vBallN;
 
     if (approach > 0) {
-      // Kick multiplier: 2.2× means a sprint touch (6.5 px/frame) sends the
-      // ball ~14 px/frame (capped at maxSpeed 10), rolling ~90 px before
-      // stopping — about 5 player-widths loose. A slow nudge (1 px/frame)
-      // sends it ~22 px, barely leaving the striker's feet.
-      const kickMult = 2.2;
-      ball.vx += approach * kickMult * nx;
-      ball.vy += approach * kickMult * ny;
+      // Power strike: sprint into ball → flies far (defender can intercept).
+      // Gentle contact: soft resolve, ball barely moves from feet.
+      const mult = approach >= STRIKE_THRESHOLD ? KICK_MULT : 1.1;
+      ball.vx += approach * mult * nx;
+      ball.vy += approach * mult * ny;
     }
   }
 
